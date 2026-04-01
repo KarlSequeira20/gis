@@ -14,16 +14,31 @@ let highlightedPincode = null;
 // Cloud Console Project Configuration
 const MAP_ID = '80777b8ad4ad293c9d11c60b';
 
-// Helper to darken/lighten colors for gradients
-function adjustColor(color, amount) {
-    return '#' + color.replace(/^#/, '').replace(/../g, color => ('0' + Math.min(255, Math.max(0, parseInt(color, 16) + amount)).toString(16)).slice(-2));
-}
-
-// geocodeCache initialization
 let geocodeCache = {};
 try {
     geocodeCache = JSON.parse(localStorage.getItem('geocodeCache')) || {};
 } catch (e) { }
+
+const darkMapStyle = [
+    { elementType: "geometry", stylers: [{ color: "#0f172a" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#1e293b" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+    { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#cbd5e1" }] },
+    { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#cbd5e1" }] },
+    { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#1e293b" }] },
+    { featureType: "poi.park", elementType: "labels.text.fill", stylers: [{ color: "#6b7280" }] },
+    { featureType: "road", elementType: "geometry", stylers: [{ color: "#334155" }] },
+    { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#1e293b" }] },
+    { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#9ca3af" }] },
+    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#475569" }] },
+    { featureType: "road.highway", elementType: "geometry.stroke", stylers: [{ color: "#1e293b" }] },
+    { featureType: "road.highway", elementType: "labels.text.fill", stylers: [{ color: "#f3f4f6" }] },
+    { featureType: "transit", elementType: "geometry", stylers: [{ color: "#1e293b" }] },
+    { featureType: "transit.station", elementType: "labels.text.fill", stylers: [{ color: "#d1d5db" }] },
+    { featureType: "water", elementType: "geometry", stylers: [{ color: "#0b1120" }] },
+    { featureType: "water", elementType: "labels.text.fill", stylers: [{ color: "#5eead4" }] },
+    { featureType: "water", elementType: "labels.text.stroke", stylers: [{ color: "#0f172a" }] },
+];
 
 // ─── AUTO-LOAD on startup ────────────────────────────────────────────────────
 window.addEventListener('load', function () {
@@ -332,8 +347,7 @@ function initializeMap() {
     }
 
     // Load GeoJSON for Indian States (Restored)
-    // Load GeoJSON for Indian States (Local file for reliability)
-    map.data.loadGeoJson('india_states_lowres.geojson', null, () => {
+    map.data.loadGeoJson('https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson', null, () => {
         geoJsonLoaded = true;
         // User requested that first view shows all states
         showIndiaView();
@@ -441,14 +455,11 @@ function showStateView(stateName, onComplete) {
 }
 
 function geocodePincode(pincode, leads, callback) {
-    // Clean pincode: remove spaces, dots, or other artifacts common in messy data
-    const cleanPin = String(pincode || '').replace(/[^0-9]/g, '').trim();
-    const isPincodeStandard = cleanPin.length === 6;
+    const cacheKey = `${pincode}_${currentState}`;
 
-    // In our cache we use the user-provided string for matching, but clean it for storage
-    const cacheKey = `${pincode}_${currentState}`.toLowerCase();
-
+    // Check if we already have the coordinates saved
     if (geocodeCache[cacheKey]) {
+        // Use a short timeout to prevent blocking the UI thread when instantly loading hundreds 
         setTimeout(() => {
             createPincodeMarker(pincode, geocodeCache[cacheKey], leads);
             callback();
@@ -457,32 +468,29 @@ function geocodePincode(pincode, leads, callback) {
     }
 
     const geocoder = new google.maps.Geocoder();
+
+    // Build a more specific address hint using any available city/locality from the leads
     const firstLead = leads[0] || {};
     const city = firstLead.city || '';
+    const locality = firstLead.locality || '';
 
-    // BUILD FLEXIBLE SEARCH STRING
-    // If we have a proper pincode, use the strict format. 
-    // Otherwise, treat the entire pincode field as an address (e.g., "Alibag" or "Mumbai 400033")
-    const searchString = isPincodeStandard
-        ? `${city ? city + ', ' : ''}${currentState} ${cleanPin}`
-        : `${pincode}, ${currentState}, India`;
-
+    // Use the most effective search format for Indian pincodes: "City, State Pincode"
     const geocodeOptions = {
-        address: searchString,
+        address: `${city ? city + ', ' : ''}${currentState} ${pincode}`,
+        componentRestrictions: {
+            postalCode: pincode,
+            country: 'IN',
+            administrativeArea: currentState
+        },
         region: 'IN'
     };
 
-    // Only apply component restriction if the input is a valid-looking numeric pincode
-    if (isPincodeStandard) {
-        geocodeOptions.componentRestrictions = {
-            postalCode: cleanPin,
-            country: 'IN'
-        };
-    }
-
     geocoder.geocode(geocodeOptions, (results, status) => {
         if (status === 'OK' && results[0]) {
+            // Check if the result actually looks like a pincode-level match if possible
             const locationType = results[0].geometry.location_type;
+            const cacheKey = pincode.toLowerCase();
+
             const strippedResult = {
                 geometry: {
                     location: {
@@ -496,15 +504,20 @@ function geocodePincode(pincode, leads, callback) {
             };
 
             geocodeCache[cacheKey] = strippedResult;
+            // Removed per-pincode localStorage write to prevent UI freezing during bulk loads
+
             createPincodeMarker(pincode, strippedResult, leads);
             callback();
+
         } else if (status === 'OVER_QUERY_LIMIT') {
+            // If we blast Google too fast, wait 1s and gracefully retry instead of failing
             setTimeout(() => geocodePincode(pincode, leads, callback), 1000);
         } else {
-            console.warn(`Geocoding failed for [${pincode}] with search string [${searchString}]. Status: ${status}`);
+            console.warn('Geocoding failed for pincode:', pincode, status);
             callback();
         }
     });
+
 }
 
 function saveGeocodeCache() {
@@ -526,33 +539,26 @@ function createPincodeMarker(pincode, geocodeResult, leads) {
     const isSuspect = isApproximate || isNotPostalCode;
 
     const baseColor = getColorByDensity(leadCount);
-    const color = baseColor; // We now use a badge for suspect markers instead of changing base color
+    const color = isSuspect ? '#fbbf24' : baseColor; // Use amber for suspect pins
 
-    // Create DOM element for Advanced Marker
-    const markerContent = document.createElement('div');
-    markerContent.className = `custom-pin-marker ${isSuspect ? 'suspect' : ''}`;
-    markerContent.style.background = `radial-gradient(circle at 30% 30%, ${color}, ${adjustColor(color, -20)})`;
-
-    // Scale based on density
-    const size = isSuspect ? 32 : Math.min(52, 28 + (leadCount / 1.5));
-    markerContent.style.width = `${size}px`;
-    markerContent.style.height = `${size}px`;
-    markerContent.style.lineHeight = `${size}px`;
-    markerContent.textContent = leadCount;
-
-    // Add pulse for high density (50+)
-    if (leadCount >= 50) {
-        const pulse = document.createElement('div');
-        pulse.className = 'marker-pulse';
-        pulse.style.color = color;
-        markerContent.appendChild(pulse);
-    }
-
-    const marker = new google.maps.marker.AdvancedMarkerElement({
-        map: map,
+    const marker = new google.maps.Marker({
         position: location,
-        content: markerContent,
-        title: `Pincode: ${pincode}${isSuspect ? ' (⚠️ Low Confidence Mapping)' : ''}`
+        title: `Pincode: ${pincode}${isSuspect ? ' (⚠️ Low Confidence Mapping)' : ''}`,
+        // Animation disabled for bulk loads to improve performance
+        label: {
+            text: leadCount.toString(),
+            color: isSuspect ? '#000000' : '#ffffff',
+            fontSize: '12px',
+            fontWeight: '700'
+        },
+        icon: {
+            path: isSuspect ? "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" : google.maps.SymbolPath.CIRCLE,
+            scale: isSuspect ? 1.5 : Math.min(24, 12 + (leadCount / 2)),
+            fillColor: color,
+            fillOpacity: 1.0,
+            strokeColor: isSuspect ? '#000000' : '#0f172a',
+            strokeWeight: 2
+        }
     });
 
     const clickHandler = () => {
@@ -560,12 +566,14 @@ function createPincodeMarker(pincode, geocodeResult, leads) {
         map.panTo(location);
         smoothZoom(map, 14, Math.round(map.getZoom()));
 
+        // Highlight boundary (Geofence isolation)
         highlightedPincode = pincode;
         refreshMapStyles();
     };
 
     marker.addListener('click', clickHandler);
 
+    // Provide a dummy method for polygon so clearMapOverlays() doesn't throw an error
     pincodeMarkers[pincode] = { marker, polygon: { setMap: () => { } }, leads, isSuspect };
 }
 
@@ -659,7 +667,7 @@ function clearMapOverlays() {
         markerCluster.clearMarkers();
     }
     Object.values(pincodeMarkers).forEach(({ marker, polygon }) => {
-        marker.map = null; // AdvancedMarkerElement uses .map property instead of setMap()
+        marker.setMap(null);
         if (polygon && typeof polygon.setMap === 'function') polygon.setMap(null);
     });
     pincodeMarkers = {};
@@ -701,28 +709,17 @@ function initMarkerClusterer() {
         renderer: {
             render: function ({ count, position }) {
                 const color = count > 50 ? '#ec4899' : count > 20 ? '#a855f7' : '#6366f1';
-
-                const container = document.createElement('div');
-                container.className = 'custom-pin-marker';
-                container.style.background = `radial-gradient(circle at 30% 30%, ${color}, ${adjustColor(color, -20)})`;
-                const size = Math.min(64, 32 + (count / 4));
-                container.style.width = `${size}px`;
-                container.style.height = `${size}px`;
-                container.style.lineHeight = `${size}px`;
-                container.textContent = count;
-                container.style.fontSize = '15px';
-
-                // High density cluster pulse
-                if (count > 20) {
-                    const pulse = document.createElement('div');
-                    pulse.className = 'marker-pulse';
-                    pulse.style.color = color;
-                    container.appendChild(pulse);
-                }
-
-                return new google.maps.marker.AdvancedMarkerElement({
+                return new google.maps.Marker({
                     position,
-                    content: container,
+                    label: { text: String(count), color: 'white', fontSize: '12px', fontWeight: 'bold' },
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        fillColor: color,
+                        fillOpacity: 0.9,
+                        strokeWeight: 2,
+                        strokeColor: '#0f172a',
+                        scale: Math.min(28, 14 + (count / 10))
+                    },
                     zIndex: 1000 + count
                 });
             }
